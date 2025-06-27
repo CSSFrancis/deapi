@@ -1,4 +1,4 @@
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
     QPushButton,
@@ -7,21 +7,33 @@ from PyQt6.QtWidgets import (
     QWidget,
     QTextEdit,
     QLineEdit,
+    QSlider,
+    QLabel,
+    QMessageBox,
 )
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6 import QtCore
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from PyQt6.QtWidgets import QMessageBox
-from PyQt6 import QtCore
 import numpy as np
-from PyQt6.QtWidgets import QSlider, QLabel
-from PyQt6.QtCore import Qt
+from rsciio.utils.tools import overwrite
+
 import deapi
 import time
 import os
 import shutil
 from scipy.ndimage import generic_filter
 from skimage.morphology import dilation, disk
-
+from PySide6.QtWidgets import QFileDialog
+import tifffile
+import mrcfile
+from PySide6.QtWidgets import QFileDialog
+from PySide6.QtGui import QTextDocument
+from jinja2 import Template
+import base64
+from io import BytesIO
+from matplotlib import pyplot as plt
 
 def var_2d(arr, factor):
     new_shape = (arr.shape[0] // factor, factor, arr.shape[1] // factor, factor)
@@ -31,9 +43,36 @@ def var_2d(arr, factor):
 def rebin_2d(arr, factor):
     new_shape = (arr.shape[0] // factor, factor, arr.shape[1] // factor, factor)
     return np.mean(arr.reshape(new_shape), axis=(1, 3))
+import numpy as np
 
 
-def mask2bad_pixel_file(mask, raw, output_file: str):
+def find_consecutive_ones(mask):
+    results = {'rows': [], 'columns': []}
+    # Rows
+    for row_idx, row in enumerate(mask):
+        padded = np.pad(row, (1, 1), 'constant')
+        diff = np.diff(padded)
+        starts = np.where(diff == 1)[0]
+        ends = np.where(diff == -1)[0]
+        for s, e in zip(starts, ends):
+            length = e - s
+            if length > 1:
+                results['rows'].append({'row': row_idx, 'start': s, 'end': e, 'length': length})
+    # Columns
+    for col_idx, col in enumerate(mask.T):
+        padded = np.pad(col, (1, 1), 'constant')
+        diff = np.diff(padded)
+        starts = np.where(diff == 1)[0]
+        ends = np.where(diff == -1)[0]
+        for s, e in zip(starts, ends):
+            length = e - s
+            if length > 1:
+                results['columns'].append({'col': col_idx, 'start': s, 'end': e, 'length': length})
+    return results
+
+
+def mask2bad_pixel_file(mask, raw, output_file: str, overwrite: bool = True):
+
     file_str = '<?xml version="1.0" encoding="utf-8"?>\n\n<BadPixels>\n\n    <BadPixelMap CentroidMode="2">\n\n'
     file_str += f"<!--Super-resolution & CES modes   Image Size: {mask.shape} -->\n"
     positions = np.argwhere(mask)
@@ -48,19 +87,33 @@ def mask2bad_pixel_file(mask, raw, output_file: str):
     # Create a directory along with any necessary intermediate directories
     if not os.path.exists(archive_dir):
         os.makedirs(archive_dir)
-    loc_time = time.localtime()
-    shutil.copy2(
-        output_file,
-        archive_dir
-        + f"\\{loc_time.tm_year}-{loc_time.tm_mon}-{loc_time.tm_mday}-{loc_time.tm_hour}-{loc_time.tm_min}-{loc_time.tm_sec}.xml",
-    )
+    if overwrite:
+        loc_time = time.localtime()
+        shutil.copy2(
+            output_file,
+            archive_dir
+            + f"\\{loc_time.tm_year}-{loc_time.tm_mon}-{loc_time.tm_mday}-{loc_time.tm_hour}-{loc_time.tm_min}-{loc_time.tm_sec}.xml",
+        )
+    print(f"Writing Bad Pixel file to: {output_file}")
     with open(output_file, "w+") as f:
         f.write(file_str)
 
+    stats = {
+        "Detector Size": mask.shape,
+        "Percent Masked": np.sum(mask) / np.prod(mask.shape),
+        "Mean": np.mean(raw),
+        "Std Dev": np.std(raw),
+        "Min": np.min(raw),
+        "Max": np.max(raw),
+    }
+    return stats
 
 class BadPixelCorrectionWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.client = deapi.Client()
+        self.client.connect()
+
 
         self.setWindowTitle("Bad Pixel Correction")
         self.resize(1300, 500)
@@ -114,6 +167,8 @@ class BadPixelCorrectionWindow(QMainWindow):
         self.range_label_max.setMinimumWidth(50)
         self.range_label_min.setMinimumWidth(50)
 
+
+
         self.timer = QtCore.QTimer()
         self.timer.setInterval(10)  # Every 10ms we will check to update the plots??
         self.timer.timeout.connect(self.update_plots)
@@ -121,6 +176,39 @@ class BadPixelCorrectionWindow(QMainWindow):
 
         # Set layout
         main_layout = QVBoxLayout()
+
+        # add buttons at the top
+        top_layout = QHBoxLayout()
+
+        self.load_flat_button = QPushButton("Load Flat Image")
+        self.load_flat_button.clicked.connect(self.load_flat_image)
+        top_layout.addWidget(self.load_flat_button)
+
+        # Add checkbox for overwrite correction file
+        self.overwrite_checkbox = QPushButton("Overwrite Correction File")
+        self.overwrite_checkbox.setCheckable(True)
+        self.overwrite_checkbox.setToolTip(
+            "Check this box to overwrite the existing bad pixel correction file."
+        )
+        self.overwrite_checkbox.setChecked(True)
+        self.overwrite_checkbox.clicked.connect(self.overwrite_checkbox_function)
+        top_layout.addWidget(self.overwrite_checkbox)
+        # Add a file dialog to select the correction file that is valid when the checkbox is checked
+
+
+        self.bad_pix_file = QLineEdit()
+        self.bad_pix_file.setReadOnly(True)
+        self.bad_pix_file.setText(f"{self.client['File Path - Bad Pixels']}")
+        self.bad_pix_file.setFixedWidth(200)
+        top_layout.addWidget(self.bad_pix_file)
+
+
+        self.correction_file_button = QPushButton("Select Correction File")
+        self.correction_file_button.clicked.connect(self.select_correction_file)
+        self.correction_file_button.setEnabled(False)  # Initially disabled
+        top_layout.addWidget(self.correction_file_button)
+        main_layout.addLayout(top_layout)
+
         all_plots_layout = QHBoxLayout()
         all_plots_layout.addWidget(self.text_output)
         plots_layout = QHBoxLayout()
@@ -179,6 +267,7 @@ class BadPixelCorrectionWindow(QMainWindow):
         self.save_correction = QPushButton("Save Bad Pixel Correction")
         self.save_correction.clicked.connect(self.save_correction_func)
         button_layout.addWidget(self.save_correction)
+        self.acquisition_time = 120
 
         # Add acquisition time input
         label = QLabel("Acq. Time (seconds):")
@@ -192,6 +281,21 @@ class BadPixelCorrectionWindow(QMainWindow):
         # Add the input to the layout
         button_layout.addWidget(label)
         button_layout.addWidget(self.acquisition_time_input)
+
+        self.dilation_size_input_min = QLineEdit()
+        self.dilation_size_input_min.setFixedWidth(30)
+        self.dilation_size_input_min.setText("2")
+        self.dilation_size_input_min.setToolTip("Set the size (radius) for dilation")
+        button_layout.addWidget(QLabel("Min Dilation Size:"))
+        button_layout.addWidget(self.dilation_size_input_min)
+
+        self.dilation_size_input_max = QLineEdit()
+        self.dilation_size_input_max.setFixedWidth(30)
+        self.dilation_size_input_max.setText("2")
+        self.dilation_size_input_max.setToolTip("Set the size (radius) for dilation")
+        button_layout.addWidget(QLabel("Max Dilation Size:"))
+        button_layout.addWidget(self.dilation_size_input_max)
+
         main_layout.addLayout(button_layout)
 
         # Add the start/stop button to the layout
@@ -200,9 +304,8 @@ class BadPixelCorrectionWindow(QMainWindow):
         self.setCentralWidget(container)
         self.show()
 
-        self.client = deapi.Client()
-        self.client.connect()
-        self.text_output.append(f"Connected to Client:{self.client}")
+
+
 
         self.raw_image = None
         self.corrected_image = None
@@ -213,11 +316,59 @@ class BadPixelCorrectionWindow(QMainWindow):
         self.num_rois = 15
         self.max_threshold = 1000
 
-        self.acquisition_time = 120
         loc_time = time.localtime()
         self.slices = []
 
         self.directory_out = f"D:\\Service\\BadPixels\\{loc_time.tm_year}-{loc_time.tm_mon}-{loc_time.tm_mday}"
+
+    def overwrite_checkbox_function(self):
+        if self.overwrite_checkbox.isChecked():
+            self.text_output.append("Overwrite Correction File is checked.")
+            self.correction_file_button.setEnabled(False)
+            self.test_bad_pixel.setEnabled(True)
+            self.bad_pix_file.setText(f"{self.client['File Path - Bad Pixels']}")
+
+
+        else:
+            self.text_output.append("Overwrite Correction File is unchecked.")
+            self.correction_file_button.setEnabled(True)
+            self.test_bad_pixel.setEnabled(False)
+            self.bad_pix_file.setText("")
+
+    def select_correction_file(self):
+        if not self.overwrite_checkbox.isChecked():
+            user_dir = os.path.expanduser("~")
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, "Select Correction File", user_dir, "XML Files (*.xml)",
+            )
+            self.bad_pix_file.setText(file_path)
+
+            if file_path:
+                self.client["File Path - Bad Pixels"] = file_path
+                self.correction_file_button.setEnabled(True)
+                self.text_output.append(f"Selected correction file: {file_path}")
+
+    def load_flat_image(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open Flat Image", "", "Image Files (*.mrc *.tif *.tiff)"
+        )
+        if not file_path:
+            return
+        if file_path.lower().endswith(".mrc"):
+            with mrcfile.open(file_path, permissive=True) as mrc:
+                image = mrc.data
+        elif file_path.lower().endswith((".tif", ".tiff")):
+            image = tifffile.imread(file_path)
+        else:
+            self.text_output.append("Unsupported file type.")
+            return
+
+        if image.ndim > 2:
+            image = image[0]  # Take the first slice if 3D
+
+        self.raw_image = image
+        self.text_output.append(f"Loaded flat image: {file_path}")
+        self.update_plots(from_file=True)
 
     def update_acquisition_time(self):
         try:
@@ -248,9 +399,9 @@ class BadPixelCorrectionWindow(QMainWindow):
                 min = image < min_value
                 max = image > max_value
                 if self.dilate_min:
-                    min = dilation(min, disk(2))
+                    min = dilation(min, disk(int(self.dilation_size_input_min.text())))
                 if self.dilate_max:
-                    max = dilation(max, disk(2))
+                    max = dilation(max, disk(int(self.dilation_size_input_max.text())))
 
                 mask = np.logical_or(min, max)
                 self.sub_images_masks.append(mask)
@@ -286,8 +437,8 @@ class BadPixelCorrectionWindow(QMainWindow):
                 )
             self.small_plot_canvases.draw_idle()
 
-    def update_plots(self):
-        if (
+    def update_plots(self, from_file=False):
+        if (from_file or
             self.is_acquiring_raw
             and not self.client.acquiring
             and self.client["Autosave Status"] not in ["Starting", "In Progress"]
@@ -413,9 +564,9 @@ class BadPixelCorrectionWindow(QMainWindow):
         min = self.raw_image < min_value
         max = self.raw_image > max_value
         if self.dilate_min:
-            min = dilation(min, disk(2))
+            min = dilation(min, disk(int(self.dilation_size_input_min.text())))
         if self.dilate_max:
-            max = dilation(max, disk(2))
+            max = dilation(max, disk(int(self.dilation_size_input_max.text())))
 
         mask = np.logical_or(min, max)
 
@@ -455,7 +606,7 @@ class BadPixelCorrectionWindow(QMainWindow):
                 self.is_acquiring_corrected = True
 
         else:
-            self.test_bad_pixel.setText("Get Raw")
+            self.test_bad_pixel.setText("Test Bad Pixel Mask")
             self.text_output.append("Stopping Testing Pixel Correction...")
             self.client.stop_acquisition()
             # Add logic for stopping the process here
@@ -464,10 +615,14 @@ class BadPixelCorrectionWindow(QMainWindow):
         self.text_output.append("Saving Bad Pixel Correction")
         # Add logic for saving the correction here
         mask = self.get_full_mask()
-        bad_pixel_dir = self.directory_out + "\\Final"
-
-        file = self.client["File Path - Bad Pixels"]
-        mask2bad_pixel_file(mask, self.raw_image, file)
+        if self.overwrite_checkbox.isChecked():
+            file = self.client["File Path - Bad Pixels"]
+            overwrite = True
+        else:
+            file = self.bad_pix_file.text()
+            overwrite=False
+        stats = mask2bad_pixel_file(mask, self.raw_image, file, overwrite=overwrite)
+        self.save_html_as_pdf(stats)
 
     def toggle_start_stop_bad_pixel(self):
         if self.start_button.text() == "Get Raw":
@@ -508,6 +663,85 @@ class BadPixelCorrectionWindow(QMainWindow):
             self.client.stop_acquisition()
             # Add logic for stopping the process here
 
+    def save_html_as_pdf(self, data):
+        # Prepare defect/correction examples
+        sl = self.slices[:3]
+        slice = np.zeros((3,3,sl[0][0].stop - sl[0][0].start, sl[0][1].stop - sl[0][1].start))
+        for i,s in enumerate(sl):
+            if self.raw_image is not None:
+                slice[i, 0] = self.raw_image[s[0], s[1]]
+            if self.sub_images_masks is not None:
+                slice[i, 1] = self.sub_images_masks[i]
+            if self.corrected_image is not None:
+                slice[i, 2] = self.corrected_image[s[0], s[1]]
+
+        fig_base64 = create_3x3_figure_base64(slice)
+
+        html_template = """
+        <html>
+        <head>
+            <style>
+                body { font-family: Arial, sans-serif; }
+                h1 { color: #2E86C1; }
+                table { border-collapse: collapse; width: 100%; }
+                th, td { border: 1px solid #ddd; padding: 8px; }
+                th { background-color: #f2f2f2; }
+                .example-table td { text-align: center; }
+            </style>
+        </head>
+        <body>
+          <h1 style="text-align: center;">Bad Pixel Correction Report</h1>
+          <p>Date: {{ date }}</p>
+          <h2>Detector Information</h2>
+            <table style="margin-left: auto; margin-right: auto;">
+              <tr><th>Metric</th><th>Value</th></tr>
+              {% for key, value in data.items() %}
+                <tr><td>{{ key }}</td><td>{{ '%.3f' % value if value is number else value }}</td></tr>
+              {% endfor %}
+            </table>
+            <h2>Selected Area ROIs</h2>
+        <p>Below are three regions from the sensor with high variance. </p>
+            <img src="data:image/png;base64,{{ fig_base64 }}" width="400">
+        </body>
+        </html>
+        """
+        from datetime import datetime
+        template = Template(html_template)
+        html = template.render(
+            data=data,
+            date=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            fig_base64=fig_base64
+        )
+
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save PDF", "", "PDF Files (*.pdf)")
+        if not file_path:
+            return
+        doc = QTextDocument()
+        doc.setHtml(html)
+        from PySide6.QtPrintSupport import QPrinter
+        printer = QPrinter()
+        printer.setOutputFormat(QPrinter.PdfFormat)
+        printer.setOutputFileName(file_path)
+        doc.print_(printer)
+
+def create_3x3_figure_base64(images):
+    import matplotlib.pyplot as plt
+    import base64
+    from io import BytesIO
+    fig, axes = plt.subplots(3, 3, figsize=(6, 6))
+    for i in range(3):
+        for j in range(3):
+            axes[i, j].imshow(images[i,j], cmap='viridis')
+            axes[i, j].axis('off')
+    axes[0, 0].set_title("Uncorrected")
+    axes[0, 1].set_title("Mask")
+    axes[0, 2].set_title("Corrected")
+    buf = BytesIO()
+    plt.tight_layout()
+    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+    plt.close(fig)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode('utf-8')
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -542,8 +776,13 @@ class MainWindow(QMainWindow):
         print("Magnification Calibration clicked")
 
 
-if __name__ == "__main__":
+def main():
     app = QApplication([])
     window = MainWindow()
     window.show()
     app.exec()
+
+
+if __name__ == "__main__":
+    main()
+
