@@ -136,6 +136,21 @@ class ContrastStretchType(IntEnum):
     HIGHCONTRAST = 6
     WIDERANGE = 7
 
+class VirtualVisualizationOption(IntEnum):
+    """
+    An Enum describing the different types of virtual image visualization options
+
+    Used to return different types of virtual images for display purposes.  Used with the
+    centroid calculation.
+
+    """
+    NONE            = 0
+    CENTROID_X      = 1
+    CENTROID_Y      = 2
+    AMPLITUDE       = 3
+    ANGLE           = 4
+    AMPLITUDE_ANGLE = 5
+
 
 class BinningMethod(IntEnum):
     NONE = 0
@@ -295,6 +310,7 @@ class Attributes:
         output_binning_x: int = 1,
         output_binning_y: int = 1,
         output_binning_method: int = 1,  # BinningMethod.AVERAGE
+        virtual_visualization_option=VirtualVisualizationOption.NONE,
     ):
 
         self.centerX = center_x
@@ -344,6 +360,7 @@ class Attributes:
         self.output_binning_x = output_binning_x
         self.output_binning_y = output_binning_y
         self.output_binning_method = output_binning_method
+        self.virtual_visualization_option = virtual_visualization_option
 
 
 class Histogram:

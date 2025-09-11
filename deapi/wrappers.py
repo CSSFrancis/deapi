@@ -22,7 +22,18 @@ def disable_scan(func):
     def wrapper(*args, **kwargs):
         print("Disabling scan")
         initial_scan = args[0]["Scan - Enable"]
-        args[0].set_property("Scan - Enable", False)
+        args[0].set_property("Scan - Enable", "Off")
+        ans = func(*args, **kwargs)
+        args[0].set_property("Scan - Enable", initial_scan)
+        return ans
+
+    return wrapper
+
+def enable_scan(func):
+    def wrapper(*args, **kwargs):
+        print("Enabling scan")
+        initial_scan = args[0]["Scan - Enable"]
+        args[0].set_property("Scan - Enable", "On")
         ans = func(*args, **kwargs)
         args[0].set_property("Scan - Enable", initial_scan)
         return ans

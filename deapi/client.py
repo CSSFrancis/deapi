@@ -41,8 +41,7 @@ from deapi.data_types import (
 from deapi.buffer_protocols import pb
 from deapi.version import version, commandVersion
 from deapi.version import commandVersion as cVersion
-from deapi.wrappers import write_only, disable_scan, deprecated_argument
-
+from deapi.wrappers import write_only, disable_scan, deprecated_argument, enable_scan
 
 ## the commandInfo contains [VERSION_MAJOR.VERSION_MINOR.VERSION_PATCH.VERSION_REVISION]
 
@@ -503,6 +502,39 @@ class Client:
         """Check if the camera is currently acquiring images. (bool)"""
         return self["Acquisition Status"] == "Acquiring"
 
+
+    @property
+    def finished(self):
+        """Check if the camera has finished acquiring images. (bool)"""
+        return self["Acquisition Status"] == "Finished" and self["Autosave Status"] == "Finished"
+
+    def wait_until_finished(self, progress_bar:bool=False):
+        """Wait until the camera has finished acquiring images.
+
+        This will block util "Aquisition Status" is "Finished" and "Autosave Status" is "Finished".
+
+        Parameters
+        ----------
+        progress_bar : bool, optional
+            If True, display a progress bar, by default False
+        """
+        while not self.finished:
+            sleep(0.1)
+
+        if progress_bar:
+            from tqdm import tqdm
+
+            total_frames = self["Number of Frames Requested"]
+            pbar = tqdm(total=total_frames, desc="Acquiring frames")
+            last_frame = 0
+            while not self.finished:
+                current_frame = self["Number of Frames Processed"]
+                if current_frame > last_frame:
+                    pbar.update(current_frame - last_frame)
+                    last_frame = current_frame
+                sleep(0.1)
+            pbar.close()
+
     @write_only
     def set_property(self, name: str, value):
         """
@@ -516,6 +548,8 @@ class Client:
             The value to set the property to
         """
 
+        if isinstance(value, bool):
+            value = "On" if value else "Off"
         t0 = self.GetTime()
         ret = False
 
@@ -555,7 +589,8 @@ class Client:
         changed_properties : list
             List of properties that have changed
         """
-
+        if isinstance(value, bool):
+            value = "On" if value else "Off"
         t0 = self.GetTime()
         ret = False
 
@@ -1264,7 +1299,7 @@ class Client:
     @write_only
     def stop_manual_final_saving(self):
         """
-        Stop saving movie during acquisition.
+        Stop saving movie during acquisition.co
         """
         start_time = self.GetTime()
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # UDP
@@ -1340,7 +1375,7 @@ class Client:
         self,
         frame_type: Union[FrameType, str] = "singleframe_integrated",
         pixel_format: Union[PixelFormat, DataType, str] = "UINT16",
-        attributes="auto",
+        attributes: Union[str, dict, Attributes]="auto",
         histogram=None,
     ):
         """
@@ -1362,7 +1397,7 @@ class Client:
                 - DE16u
                 - DE32f
                 - DE64f
-        attributes: Attributes | str | None
+        attributes: Attributes | str | dict | None
             Defines the image to be returned, some members can be updated.
             Some members of this parameter are input only, some are input/output.
         histogram: Histogram | None
@@ -1378,8 +1413,8 @@ class Client:
         if isinstance(pixel_format, str):
             pixel_format = getattr(PixelFormat, pixel_format)
 
-        if attributes == "auto":
-            attributes = Attributes()
+        if attributes == "auto" or isinstance(attributes, dict):
+            attributes = Attributes(**attributes) if isinstance(attributes, dict) else Attributes()
             scan_images = [17, 18, 19, 20, 21, 22, 23, 24, 25]
             if frame_type.value in scan_images:
                 attributes.windowWidth = self.scan_sizex
@@ -1446,6 +1481,7 @@ class Client:
                     attributes.output_binning_x,
                     attributes.output_binning_y,
                     attributes.output_binning_method,
+                    attributes.virtual_visualization_option,
                 ]
             )
 
@@ -1541,7 +1577,6 @@ class Client:
 
                     if (
                         histogram != None
-                        and histo_bins > 0
                         and len(values) >= i + histogram.bins
                     ):
                         histogram.data = [0] * histogram.bins
@@ -2388,6 +2423,36 @@ class Client:
 
         self.SetProperty("Exposure Mode", prevExposureMode)
         self.SetProperty("Exposure Time (seconds)", prevExposureTime)
+
+        return
+
+    @enable_scan
+    def take_vacuum_reference(self, make_linear_plane=False):
+        """
+        Get the vacuum reference of the current camera on DE-Server.
+
+        Parameters
+        ----------
+        make_linear_plane : bool, optional
+            If True, the vacuum reference will be fit to a linear plane. This is usually a good
+            assumption for raster scans at modestly high magnifications and is recommended in most cases.
+            It might be worth testing to see if it is a valid assumption for your microscope and at
+            low magnifications it might not be a good assumption. By default, False.
+        """
+        prevExposureMode = self.GetProperty("Exposure Mode")
+        self.SetProperty("Exposure Mode", "Vacuum")
+        self["Scan - Vacuum Reference Correction"] = "Off"
+
+        self.StartAcquisition(1)
+        if make_linear_plane:
+            self.set_property(name="Reference - Vacuum Make Linear Plane",
+                              value="On")
+        while self.acquiring:
+            time.sleep(1)
+
+        # reset the exposure mode
+        self.SetProperty("Exposure Mode", prevExposureMode)
+        self["Scan - Vacuum Reference Correction"] = "On"
 
         return
 
