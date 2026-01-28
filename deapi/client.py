@@ -337,7 +337,7 @@ class Client:
         if search is not None:
             available_registers = [p for p in available_registers if search in p]
         return available_registers
-    
+
     @deprecated_argument(
         name="propertyName", since="5.2.0", alternative="property_name"
     )
@@ -505,7 +505,7 @@ class Client:
                     )
 
         return ret
-    
+
     def get_register(self, register_name: str):
         """
         Get the value of a register of the current camera on DE-Server
@@ -572,6 +572,11 @@ class Client:
         value : any
             The value to set the property to
         """
+        if isinstance(value, bool):
+            if value:
+                value = "On"
+            else:
+                value = "Off"
 
         t0 = self.GetTime()
         ret = False
@@ -636,7 +641,7 @@ class Client:
             )
 
         return ret
-    
+
 
     @write_only
     def set_register(self, name: str, value):
@@ -1390,19 +1395,55 @@ class Client:
             The height of the scan array, by default None. If None, the max of the y positions
             will be used and the scan will cover the full height of the image.
         """
+        # first check to see if multiple arrays were passed in:
+        new_width = 0
+        new_height = 0
+        if isinstance(positions, list):
+            for i in range(len(positions)):
+                pos = positions[i]
+                if not isinstance(pos, np.ndarray):
+                    log.error("Positions must be a numpy array or list of numpy arrays")
+                    return False
+                else:
+                    if not pos.dtype == np.int32:
+                        log.error("Positions must be integers... Casting to int")
+                        positions[i] = pos.astype(np.int32)
+                    elif pos.ndim != 2 or pos.shape[1] != 2:
+                        log.error("Positions must be of shape (N, 2)")
+                        return False
+                    if width is None:
+                        new_width = max(new_width, np.max(pos[:, 0]) + 1)
+                    if height is None:
+                        new_height = max(new_height, np.max(pos[:, 1]) + 1)
+        # For an array handle both 2 and 3d cases...
+        elif isinstance(positions, np.ndarray):
+            if positions.ndim > 3:
+                log.error("Positions must be a 2D array of shape (N, 2) or 3D array of shape (M, N, 2)")
+                return False
+            elif positions.ndim == 2:
+                positions = positions[np.newaxis, :, :]
+            if positions.dtype != np.int32:
+                log.error("Positions must be integers... Casting to int")
+                positions = positions.astype(np.int32)
+            if width is None:
+                new_width = np.max(positions[:,:, 0]) + 1
+            if height is None:
+                new_height = np.max(positions[:,:, 1]) + 1
 
-        if positions.dtype != np.int32:
-            log.error("Positions must be integers... Casting to int")
-            positions = positions.astype(np.int32)
-        if width is None:
-            width = np.max(positions[:, 0]) + 1
-        if height is None:
-            height = np.max(positions[:, 1]) + 1
+        if width is not None:
+            new_width = width
+        if height is not None:
+            new_height = height
 
-        num_positions = len(positions)
+        num_positions = []
 
+        for pos in positions:
+            num_positions.append(len(pos))
+
+        vals_to_send = [int(new_width), int(new_height)] + num_positions
+        print("Vals to send:", vals_to_send)
         command = self._addSingleCommand(
-            self.SET_SCAN_XY_ARRAY, None, [width, height, num_positions]
+            self.SET_SCAN_XY_ARRAY, None, vals_to_send
         )
         try:
             packet = struct.pack("I", command.ByteSize()) + command.SerializeToString()
@@ -1413,12 +1454,16 @@ class Client:
             raise socket.error(
                 "Error sending x-y scan positions to socket. Is the server running?"
             )
+
         if ret:
             try:
-                x = positions[:, 0].tobytes()
-                self.__sendToSocket(self.socket, x, len(x))
-                y = positions[:, 1].tobytes()
-                self.__sendToSocket(self.socket, y, len(y))
+                # convert to bytes and send
+
+                for pos in positions:
+                    x = pos[:, 0].tobytes()
+                    y = pos[:, 1].tobytes()
+                    self.__sendToSocket(self.socket, x, len(x))
+                    self.__sendToSocket(self.socket, y, len(y))
             except socket.error as e:
                 log.log(logging.ERROR, "Error sending data to socket: %s", e)
                 return False
@@ -2773,7 +2818,7 @@ class Client:
     GetProperty = get_property
     SetProperty = set_property
     SetPropertyAndGetChangedProperties = set_property_and_get_changed_properties
-    GetRegister = get_register 
+    GetRegister = get_register
     SetRegister = set_register
     ListRegisters = list_registers
     setEngMode = set_engineering_mode
@@ -2849,7 +2894,7 @@ class Client:
     GET_PROPERTY_SPECIFICATIONS = 35
     GET_REGISTER = 38
     SET_REGISTER = 39
-    LIST_REGISTERS = 40 
+    LIST_REGISTERS = 40
 
 
 MMF_DATA_HEADER_SIZE = 24
