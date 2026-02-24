@@ -23,6 +23,9 @@ dependencies = [
     "scipy",
     "scikit-image",
     "sympy",
+    "uv>=0.10.0",
+    "anywidget>=0.9.21",
+    "ipykernel>=6.29.5",
 ]
 description = "API for DE Server"
 version = "5.3b2"
