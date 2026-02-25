@@ -606,6 +606,7 @@ class SimpleViewer(anywidget.AnyWidget):
             image = FrameType.__getitem__(image.upper())
         self.image = image
         self._stop_loop = False
+        self._last_histogram = None  # Store the last histogram result
         self.observe(self._on_window_size_changed, names=['window_width', 'window_height'])
         self.observe(self._on_zoom_pan_changed, names=['zoom', 'center_x', 'center_y'])
         self._update_image()
@@ -736,8 +737,15 @@ class SimpleViewer(anywidget.AnyWidget):
             stretch_type=ContrastStretchType.LINEAR,
         )
 
-        result = self.client.get_result(self.image, attributes=a, pixel_format=PixelFormat.UINT8)
+        # Request histogram data
+        from deapi.data_types import Histogram
+        histogram = Histogram(bins=256)
+
+        result = self.client.get_result(self.image, attributes=a, pixel_format=PixelFormat.UINT8, histogram=histogram)
         # Server handles contrast stretching based on stretch_type, returns uint8 directly
+
+        # Store histogram for linked widgets
+        self._last_histogram = result.histogram
 
 
         img = result.image

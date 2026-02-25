@@ -771,6 +771,19 @@ class Result(ResultBase):
             f" histogram={self.histogram})"
         )
 
+    def _ipython_display_(self):
+        """Display the result in Jupyter using ResultViewer widget"""
+        try:
+            from deapi.widget.result_viewer import ResultViewer
+            viewer = ResultViewer(result=self)
+            from IPython.display import display
+            display(viewer)
+        except ImportError as e:
+            # Fallback to matplotlib if widget not available
+            print(f"Widget display not available: {e}")
+            print("Use result.plot() for matplotlib display")
+            self.plot()
+
     def plot(self, axs=None, color_histogram=True, colorbar=False, **kwargs):
         """Plot the image using matplotlib
 

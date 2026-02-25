@@ -1782,6 +1782,64 @@ class Client:
 
         return Result(image, pixel_format, attributes, histogram)
 
+    def get_live_result(self, frame_type="singleframe_integrated", display_histogram=False):
+        """Get a live-updating viewer for the specified frame type
+
+        Creates an interactive widget that automatically updates when the client is acquiring.
+
+        Parameters
+        ----------
+        frame_type : str or FrameType, optional
+            The frame type to display. Default is "singleframe_integrated".
+            Options include:
+            - "singleframe_integrated"
+            - "virtual_image0", "virtual_image1", etc.
+        display_histogram : bool, optional
+            If True, returns a LiveResultViewer with both image and histogram side-by-side.
+            If False, returns just a SimpleViewer. Default is False.
+
+        Returns
+        -------
+        SimpleViewer or LiveResultViewer
+            An interactive widget that updates automatically during acquisition.
+            If display_histogram=True, the returned LiveResultViewer has:
+            - .viewer - access to the SimpleViewer component
+            - .histogram - access to the HistogramViewer component
+
+        Examples
+        --------
+        >>> # Simple viewer without histogram
+        >>> client = Client()
+        >>> client.connect()
+        >>> viewer = client.get_live_result()
+        >>> display(viewer)
+
+        >>> # Viewer with live histogram side-by-side
+        >>> viewer = client.get_live_result(display_histogram=True)
+        >>> display(viewer)
+
+        >>> # Different frame type with histogram
+        >>> viewer = client.get_live_result("virtual_image0", display_histogram=True)
+        >>> display(viewer)
+
+        >>> # Access and configure components
+        >>> viewer = client.get_live_result(display_histogram=True)
+        >>> viewer.viewer.window_width = 600  # Configure image viewer
+        >>> viewer.histogram.log_scale = True  # Configure histogram
+        >>> display(viewer)
+
+        Notes
+        -----
+        - The viewer automatically starts updating when you display it
+        - Updates at ~30 FPS when client is acquiring
+        - To stop updates: viewer.stop()
+        - For LiveResultViewer, histogram height automatically matches image height
+        """
+        from deapi.widget import ResultViewer
+        viewer = ResultViewer(client=self, image=frame_type)
+        viewer.histogram_visible = display_histogram
+        return viewer
+
     @write_only
     def set_virtual_mask(self, id, w, h, mask):
         """
