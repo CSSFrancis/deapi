@@ -10,6 +10,8 @@ import numpy as np
 import traitlets
 from typing import Optional, Union
 
+from deapi import FrameType, PixelFormat
+
 
 class ResultViewer(anywidget.AnyWidget):
     """A unified widget that combines image viewing and histogram display
@@ -70,6 +72,25 @@ class ResultViewer(anywidget.AnyWidget):
     zoom = traitlets.Float(1.0).tag(sync=True)
     center_x = traitlets.Float(0.5).tag(sync=True)
     center_y = traitlets.Float(0.5).tag(sync=True)
+
+    # Virtual masks (4 masks)
+    mask_1_data = traitlets.Bytes(b"").tag(sync=True)  # JSON array of mask objects (updated from server)
+    mask_2_data = traitlets.Bytes(b"").tag(sync=True)
+    mask_3_data = traitlets.Bytes(b"").tag(sync=True)
+    mask_4_data = traitlets.Bytes(b"").tag(sync=True)
+
+    mask_1_visible = traitlets.Bool(False).tag(sync=True)
+    mask_2_visible = traitlets.Bool(False).tag(sync=True)
+    mask_3_visible = traitlets.Bool(False).tag(sync=True)
+    mask_4_visible = traitlets.Bool(False).tag(sync=True)
+
+    mask_1_color = traitlets.Unicode('rgba(255, 0, 0, 0.5)').tag(sync=True)
+    mask_2_color = traitlets.Unicode('rgba(0, 255, 0, 0.5)').tag(sync=True)
+    mask_3_color = traitlets.Unicode('rgba(0, 0, 255, 0.5)').tag(sync=True)
+    mask_4_color = traitlets.Unicode('rgba(255, 255, 0, 0.5)').tag(sync=True)
+
+    drawing_tool = traitlets.Unicode('').tag(sync=True)  # '', 'circle', 'square'
+    toolbar_visible = traitlets.Bool(False).tag(sync=True)
 
     _esm = """
     console.log('ResultViewer module loading...');
@@ -519,43 +540,125 @@ class ResultViewer(anywidget.AnyWidget):
           model.save_changes();
           console.log('Histogram visibility toggled (H key):', !currentVisible, '- canvas focused');
           e.preventDefault();
+        } else if (e.key === '1' || e.key === '2' || e.key === '3' || e.key === '4') {
+          const maskNum = parseInt(e.key);
+          const currentVisible = model.get(`mask_${maskNum}_visible`);
+          model.set(`mask_${maskNum}_visible`, !currentVisible);
+          model.save_changes();
+          console.log(`Mask ${maskNum} visibility toggled:`, !currentVisible);
+          e.preventDefault();
         }
       });
       
-      // Draw image function
-      function drawImage() {
-        const imageBytes = new Uint8Array(model.get('image_bytes').buffer);
-        const width = model.get('image_width');
-        const height = model.get('image_height');
-        const canvasWidth = parseInt(imageCanvas.style.width);
-        const canvasHeight = parseInt(imageCanvas.style.height);
-        
-        if (imageBytes.length === 0) {
-          return;
+    // Draw masks function
+    function drawMasks() {
+      const canvasWidth = parseInt(imageCanvas.style.width);
+      const canvasHeight = parseInt(imageCanvas.style.height);
+      const imgWidth = model.get('image_width');
+      const imgHeight = model.get('image_height');
+    
+      for (let i = 1; i <= 4; i++) {
+        const visible = model.get(`mask_${i}_visible`);
+        if (!visible) continue;
+    
+        const maskBytes = new Uint8Array(model.get(`mask_${i}_data`).buffer);
+        if (maskBytes.length === 0) continue;
+    
+        // Mask dimensions should match image dimensions
+        if (maskBytes.length !== imgWidth * imgHeight) {
+          console.error(`Mask ${i} size mismatch: expected ${imgWidth * imgHeight}, got ${maskBytes.length}`);
+          continue;
         }
+    
+        const color = model.get(`mask_${i}_color`);
+    
+        // Parse color
+        const colorMatch = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+        if (!colorMatch) continue;
         
-        imgCtx.clearRect(0, 0, canvasWidth, canvasHeight);
-        
-        const imageData = imgCtx.createImageData(width, height);
-        const rgba = imageData.data;
-        
-        for (let i = 0; i < imageBytes.length; i++) {
-          const gray = imageBytes[i];
-          const idx = i * 4;
-          rgba[idx] = gray;
-          rgba[idx + 1] = gray;
-          rgba[idx + 2] = gray;
-          rgba[idx + 3] = 255;
-        }
-        
+        const [_, r, g, b, a] = colorMatch;
+        const alpha = Math.round((parseFloat(a || 1)) * 255);
+    
+        // Create temporary canvas for mask at image resolution
         const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = width;
-        tempCanvas.height = height;
+        tempCanvas.width = imgWidth;
+        tempCanvas.height = imgHeight;
         const tempCtx = tempCanvas.getContext('2d');
+    
+        // Create ImageData for the mask
+        const imageData = tempCtx.createImageData(imgWidth, imgHeight);
+        const rgba = imageData.data;
+    
+        // Fill mask pixels based on mask value
+        // 2 = masked (show in color)
+        // 1 = unmasked (transparent, don't show)
+        // 0 = negative mask (show in darker/different color)
+        for (let idx = 0; idx < maskBytes.length; idx++) {
+          const maskValue = maskBytes[idx];
+          const pixelIdx = idx * 4;
+          
+          if (maskValue === 2) {
+            // Masked region - show in specified color
+            rgba[pixelIdx] = parseInt(r);
+            rgba[pixelIdx + 1] = parseInt(g);
+            rgba[pixelIdx + 2] = parseInt(b);
+            rgba[pixelIdx + 3] = alpha;
+          } else if (maskValue === 0) {
+            // Negative mask - show in darker version of color
+            rgba[pixelIdx] = Math.round(parseInt(r) * 0.3);
+            rgba[pixelIdx + 1] = Math.round(parseInt(g) * 0.3);
+            rgba[pixelIdx + 2] = Math.round(parseInt(b) * 0.3);
+            rgba[pixelIdx + 3] = alpha;
+          }
+          // maskValue === 1 (unmasked) - leave transparent
+        }
+    
         tempCtx.putImageData(imageData, 0, 0);
-        
-        imgCtx.drawImage(tempCanvas, 0, 0, width, height, 0, 0, canvasWidth, canvasHeight);
+    
+        // Draw filled mask on main canvas (scaled to canvas size)
+        // This automatically handles zoom/pan because the mask comes from server with same attributes
+        imgCtx.drawImage(tempCanvas, 0, 0, imgWidth, imgHeight,
+                         0, 0, canvasWidth, canvasHeight);
       }
+    }
+      
+      // Draw image function
+    function drawImage() {
+      const imageBytes = new Uint8Array(model.get('image_bytes').buffer);
+      const width = model.get('image_width');
+      const height = model.get('image_height');
+      const canvasWidth = parseInt(imageCanvas.style.width);
+      const canvasHeight = parseInt(imageCanvas.style.height);
+    
+      if (imageBytes.length === 0) {
+        return;
+      }
+    
+      imgCtx.clearRect(0, 0, canvasWidth, canvasHeight);
+    
+      const imageData = imgCtx.createImageData(width, height);
+      const rgba = imageData.data;
+    
+      for (let i = 0; i < imageBytes.length; i++) {
+        const gray = imageBytes[i];
+        const idx = i * 4;
+        rgba[idx] = gray;
+        rgba[idx + 1] = gray;
+        rgba[idx + 2] = gray;
+        rgba[idx + 3] = 255;
+      }
+    
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = width;
+      tempCanvas.height = height;
+      const tempCtx = tempCanvas.getContext('2d');
+      tempCtx.putImageData(imageData, 0, 0);
+    
+      imgCtx.drawImage(tempCanvas, 0, 0, width, height, 0, 0, canvasWidth, canvasHeight);
+    
+      // Draw masks on top
+      drawMasks();
+    }
       
       // Draw histogram function
       function drawHistogram() {
@@ -671,7 +774,11 @@ class ResultViewer(anywidget.AnyWidget):
       model.on('change:scale_x', drawScaleBar);
       model.on('change:image_width', drawScaleBar);
       model.on('change:units', drawScaleBar);
-      
+      for (let i = 1; i <= 4; i++) {
+          model.on(`change:mask_${i}_data`, drawImage);
+          model.on(`change:mask_${i}_visible`, drawImage);
+          model.on(`change:mask_${i}_color`, drawImage);
+        }
       // Initial draw
       drawImage();
       drawHistogram();
@@ -717,6 +824,7 @@ class ResultViewer(anywidget.AnyWidget):
             # Set up observers for dynamic updates
             self.observe(self._on_window_size_changed, names=['viewer_width', 'viewer_height'])
             self.observe(self._on_zoom_pan_changed, names=['zoom', 'center_x', 'center_y'])
+            self.observe(self._on_mask_visibility_changed, names=['mask_1_visible', 'mask_2_visible', 'mask_3_visible', 'mask_4_visible'])
 
             # Initial update and start live loop
             self._update_image()
@@ -729,6 +837,11 @@ class ResultViewer(anywidget.AnyWidget):
 
     def _on_window_size_changed(self, change):
         """Update canvas size when window dimensions change (dynamic mode only)"""
+        if self._client is not None:
+            self._update_image()
+
+    def _on_mask_visibility_changed(self, change):
+        """Update image when mask visibility changes (dynamic mode only)"""
         if self._client is not None:
             self._update_image()
 
@@ -791,11 +904,11 @@ class ResultViewer(anywidget.AnyWidget):
 
         if (FrameType.VIRTUAL_IMAGE0.value <= self._image.value <= FrameType.VIRTUAL_IMAGE4.value or
             FrameType.EXTERNAL_IMAGE1.value <= self._image.value <= FrameType.EXTERNAL_IMAGE4.value):
-            self.raw_image_size_x = self._client["Scan - Size X"]
-            self.raw_image_size_y = self._client["Scan - Size Y"]
+            self.raw_image_size_x = int(self._client["Scan - Size X"])
+            self.raw_image_size_y = int(self._client["Scan - Size Y"])
         else:
-            self.raw_image_size_x = self._client["Image Size X (pixels)"]
-            self.raw_image_size_y = self._client["Image Size Y (pixels)"]
+            self.raw_image_size_x = int(self._client["Image Size X (pixels)"])
+            self.raw_image_size_y = int(self._client["Image Size Y (pixels)"])
 
     def get_scale(self):
         """Get scale information from the client"""
@@ -805,19 +918,43 @@ class ResultViewer(anywidget.AnyWidget):
             if (FrameType.VIRTUAL_IMAGE0.value <= self._image.value <= FrameType.VIRTUAL_IMAGE4.value or
                 FrameType.EXTERNAL_IMAGE1.value <= self._image.value <= FrameType.EXTERNAL_IMAGE4.value):
                 # Diffraction pattern - use mrad units
-                self.scale_x = self._client["Diffraction Pixel Size X"]
-                self.scale_y = self._client["Diffraction Pixel Size Y"]
+                self.scale_x = float(self._client["Diffraction Pixel Size X"])
+                self.scale_y = float(self._client["Diffraction Pixel Size Y"])
                 self.units = "mrad" if self.scale_x > 0 else "px"
             else:
                 # Real space image - use nm units
-                self.scale_x = self._client["Specimen Pixel Size X (nanometers)"]
-                self.scale_y = self._client["Specimen Pixel Size Y (nanometers)"]
+                self.scale_x = float(self._client["Specimen Pixel Size X (nanometers)"])
+                self.scale_y = float(self._client["Specimen Pixel Size Y (nanometers)"])
                 self.units = "nm" if self.scale_x > 0 else "px"
         except (KeyError, AttributeError, TypeError) as e:
             print(f"Scale information not available: {e}. Using pixels.")
             self.scale_x = 1.0
             self.scale_y = 1.0
             self.units = "px"
+
+    def set_mask(self, mask, mask_index=1, color='rgba(255, 0, 0, 0.5)', visible=True):
+        """Set a boolean mask overlay
+
+        Parameters
+        ----------
+        mask : np.ndarray
+            Boolean or binary mask array
+        mask_index : int
+            Which mask slot to use (1-4)
+        color : str
+            RGBA color string for the mask
+        visible : bool
+            Whether to show the mask initially
+        """
+        if mask.dtype != bool:
+            mask = mask.astype(bool)
+
+        # Store mask as uint8 byte array (0 or 255)
+        mask_bytes = (mask.astype(np.uint8) * 255).tobytes()
+
+        setattr(self, f'mask_{mask_index}_data', mask_bytes)
+        setattr(self, f'mask_{mask_index}_color', color)
+        setattr(self, f'mask_{mask_index}_visible', visible)
 
     def _update_image(self):
         """Update the image from the client (dynamic mode)"""
@@ -851,6 +988,20 @@ class ResultViewer(anywidget.AnyWidget):
 
         histogram = Histogram(bins=256)
         result = self._client.get_result(self._image, attributes=a, pixel_format=PixelFormat.UINT8, histogram=histogram)
+
+        # Fetch masks if visible
+        for i , ft in enumerate([FrameType.VIRTUAL_MASK1,FrameType.VIRTUAL_MASK2,
+                           FrameType.VIRTUAL_MASK3,FrameType.VIRTUAL_MASK4]):
+            if getattr(self, f'mask_{i + 1}_visible'):
+                mask_result = self._client.get_result(
+                    ft,
+                    attributes=a,
+                    pixel_format=PixelFormat.UINT8,  # 2 is masked, 1 is unmasked, 0 is negative mask
+                    histogram=None
+                )
+                setattr(self, f'mask_{i + 1}_data', mask_result.image.tobytes())
+
+
 
         self._last_histogram = result.histogram
 
@@ -966,6 +1117,34 @@ class ResultViewer(anywidget.AnyWidget):
 
         # Update traits
         with self.hold_trait_notifications():
+            # Fetch masks if visible (only in dynamic mode with client)
+            if hasattr(self, '_client') and self._client is not None:
+                from deapi.data_types import Attributes
+                from deapi import ContrastStretchType
+
+                # Create attributes for mask fetching
+                a = Attributes(
+                    window_width=image_normalized.shape[1],
+                    window_height=image_normalized.shape[0],
+                    zoom=1.0,
+                    center_x=image_normalized.shape[1] // 2,
+                    center_y=image_normalized.shape[0] // 2,
+                    stretch_type=ContrastStretchType.LINEAR,
+                )
+
+                for i in range(4):
+                    if getattr(self, f'mask_{i + 1}_visible'):
+                        try:
+                            mask_result = self._client.get_result(
+                                FrameType.VIRTUAL_MASK1 + i,
+                                attributes=a,
+                                pixel_format=PixelFormat.UINT8,  # 2 is masked, 1 is unmasked, 0 is negative mask
+                                histogram=None
+                            )
+                            setattr(self, f'mask_{i + 1}_data', mask_result.image.tobytes())
+                        except Exception as e:
+                            print(f"Error fetching mask {i + 1}: {e}")
+
             self.image_bytes = image_normalized.tobytes()
             self.image_width = image_normalized.shape[1]
             self.image_height = image_normalized.shape[0]

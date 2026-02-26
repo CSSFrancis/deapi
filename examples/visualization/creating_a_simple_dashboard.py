@@ -1,6 +1,6 @@
 """
-Creating a Simple Dashboard with Panel and Matplotlib
-------------------------------------------------------
+Creating a Simple Dashboard with Panel and Custom Widgets
+---------------------------------------------------------
 
 If you haven't already looked at the "The `get_result` Function" example, please do so as it
 provides important context for how the `get_result` function can be used to build responsive

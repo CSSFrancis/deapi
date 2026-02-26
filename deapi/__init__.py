@@ -15,6 +15,16 @@ from deapi.data_types import (
     PropertyCollection,
 )
 
+# Automatically enable property and action widgets if Panel is installed
+try:
+    import panel as pn
+    from deapi.panel import enable_property_widgets, enable_action_widgets
+    enable_property_widgets(Client)
+    enable_action_widgets(Client)
+    _PANEL_AVAILABLE = True
+except ImportError:
+    _PANEL_AVAILABLE = False
+
 
 __all__ = [
     "Client",
