@@ -47,7 +47,10 @@ IMAGE = np.dtype(
         ("scanX", "<i4"),
         ("scanY", "<i4"),
         ("valid", "<i4"),
-        ("pad", "<i4"),
+        (
+            "pattern",
+            "<i4",
+        ),  # a queued XY scan's pattern: the hold 1000, none -1; else 0
     ]
 )
 PROFILE = (

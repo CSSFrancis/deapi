@@ -1568,6 +1568,59 @@ class Client:
             )
         return ret
 
+    @write_only
+    def append_xy_array(self, positions):
+        """
+        Append a pattern of x,y positions to a running XY queue scan.
+
+        With ``"Scan - XY Queue"`` on, an XY array scan started with
+        :meth:`start_acquisition` runs the pattern set by :meth:`set_xy_array`, then each
+        appended pattern in turn, holding the beam at the park position while the queue is
+        empty. It ends after :meth:`end_xy_queue`, or once the queue has been empty for
+        ``"Scan - XY Queue Timeout (seconds)"``.
+
+        Parameters
+        ----------
+        positions : np.ndarray
+            The positions in the form [[x1, y1], [x2, y2], ...], integers within the scan
+            array set by :meth:`set_xy_array`. An empty array ends the queue.
+
+        Returns
+        -------
+        bool
+            True if the server queued the pattern; False when the queue is off, no scan is
+            running, or the queue has ended.
+        """
+        positions = np.asarray(positions, dtype=np.int32).reshape(-1, 2)
+        command = self._addSingleCommand(
+            self.APPEND_SCAN_XY_ARRAY, None, [int(len(positions))]
+        )
+        packet = struct.pack("I", command.ByteSize()) + command.SerializeToString()
+        payload = (
+            np.ascontiguousarray(positions[:, 0]).tobytes()
+            + np.ascontiguousarray(positions[:, 1]).tobytes()
+        )
+        try:
+            self.__sendToSocket(
+                self.socket, packet + payload, len(packet) + len(payload)
+            )
+        except socket.error:
+            raise socket.error(
+                "Error appending x-y scan positions to socket. Is the server running?"
+            )
+        return self.__ReceiveResponseForCommand(command) is not False
+
+    def end_xy_queue(self):
+        """
+        End a running XY queue scan: the patterns already appended run, then the scan ends.
+
+        Returns
+        -------
+        bool
+            True if the server ended the queue.
+        """
+        return self.append_xy_array(np.zeros((0, 2), dtype=np.int32))
+
     @deprecated_argument(name="frameType", since="5.2.0", alternative="frame_type")
     @deprecated_argument(name="pixelFormat", since="5.2.0", alternative="pixel_format")
     def get_result(
@@ -3090,8 +3143,14 @@ class Client:
 
         return False
 
+    def _socket_timeout(self):
+        """Seconds to wait on the server: ten exposures and half a minute, within what a
+        socket accepts. A queued XY scan reports an exposure of weeks, as its end is not
+        known when it starts."""
+        return min(self.exposureTime * 10 + 30, MAX_SOCKET_TIMEOUT)
+
     def _recvFromSocket(self, sock, bytes):
-        timeout = self.exposureTime * 10 + 30
+        timeout = self._socket_timeout()
         startTime = self.GetTime()
         self.socket.settimeout(timeout)
 
@@ -3155,7 +3214,7 @@ class Client:
         connection hung. ``sendall`` loops until every byte is sent and raises
         ``socket.timeout`` if the server stops reading for *timeout* seconds.
         """
-        timeout = self.exposureTime * 10 + 30
+        timeout = self._socket_timeout()
         self.socket.settimeout(timeout)
         sock.sendall(buffer)
         return buffer
@@ -3301,8 +3360,11 @@ class Client:
     GET_VIRTUAL_IMAGE = 42
     GET_CLIENT_READ_ONLY = 43
     GET_GPU_FRAMES = 44
+    SET_CLIENT_IMAGE = 45
+    APPEND_SCAN_XY_ARRAY = 46
 
 
+MAX_SOCKET_TIMEOUT = 2_000_000  # seconds: Windows takes at most 2**31 - 1 milliseconds
 MMF_DATA_HEADER_SIZE = 24
 MMF_IMAGE_BUFFER_SIZE = 8192 * 16384 * 4
 MMF_DATA_BUFFER_SIZE = MMF_IMAGE_BUFFER_SIZE + MMF_DATA_HEADER_SIZE
